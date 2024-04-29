@@ -1,0 +1,651 @@
+---
+title: "Hierarchical Clustering"
+author: "Nolan Pittman"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r}
+# Libraries
+library(tidyverse)
+library(caret)
+library(rsample)
+library(cluster)    
+library(factoextra) 
+library(dendextend)
+library(GGally)
+
+setwd("C:/Users/legio/OneDrive/Spring 2024/SAL 358/Reds Hackathon")
+```
+
+
+## Data Manipulation
+
+```{r}
+# Read in data
+fangraphs_season_level <- read_csv("fangraphs.csv")
+
+# Filtering data
+optic_data <- fangraphs_season_level %>%
+  filter(TBF >= 50) 
+
+optic_data <- left_join(optic_data, savant %>%
+  group_by(pitcher, role_key) %>% 
+  drop_na(shadow) %>% 
+  summarise(shadow_pct = sum(shadow)/n()),
+  by = c("MLBAMID" = "pitcher",
+         "Role" = "role_key"))
+
+# Splitting into starters and relievers
+starters <- optic_data %>%
+  filter(Role == "SP")
+
+relievers <- optic_data %>%
+  filter(Role == "RP")
+
+predictors <- c("K_pct", "BB_pct", "OSwing_pct", "ZSwing_pct",
+                "OContact_pct", "ZContact_pct", "Swing_pct",
+                "Zone_pct", "FStrike_pct", "shadow_pct",
+                "Contact_pct", "SwStr_pct", "CStr_pct")
+
+# Scaling all predictor variables
+starter_data <- starters %>%
+  select('MLBAMID', 'NameASCII', 'Season', predictors) %>%
+  group_by(Season) %>%
+  mutate(across(all_of(predictors), ~scale(.), 
+                .names = "{.col}_scaled")) %>%
+  mutate(across(.cols = c(K_pct, BB_pct, OSwing_pct, 
+                          ZSwing_pct,
+                OContact_pct, ZContact_pct, Swing_pct,
+                Zone_pct, FStrike_pct, shadow_pct,
+                Contact_pct, SwStr_pct, CStr_pct),
+                ~ntile(., 100), 
+                .names = "{.col}_percentile")) %>%
+  ungroup() %>%
+  na.omit()
+
+reliever_data <- relievers %>%
+  select('MLBAMID', 'NameASCII', 'Season', predictors) %>%
+  group_by(Season) %>%
+  mutate(across(all_of(predictors), ~scale(.), 
+                .names = "{.col}_scaled")) %>%
+  mutate(across(.cols = c(K_pct, BB_pct, OSwing_pct, 
+                          ZSwing_pct, OContact_pct, 
+                          ZContact_pct, Swing_pct,
+                Zone_pct, FStrike_pct, shadow_pct,
+                Contact_pct, SwStr_pct, CStr_pct),
+                ~ntile(., 100), 
+                .names = "{.col}_percentile")) %>%
+  ungroup() %>%
+  na.omit()
+
+SP_stuff_percentiles <- starter_data %>%
+  select(contains("percentile")) 
+
+RP_stuff_percentiles <- reliever_data %>%
+  select(contains("percentile")) 
+```
+
+
+## Agglomerative Clustering with hclust
+
+```{r}
+# Calculating dissimilarity matrix using euclidean distance
+SP_distance_mat <- dist(SP_stuff_percentiles, 
+                        method = "euclidean")
+
+RP_distance_mat <- dist(RP_stuff_percentiles, 
+                        method = "euclidean")
+
+set.seed(240)
+# Creating hierarchical clustering using euclidean distance
+# and agglomerative method (bottom-up)
+SP_stuff_hierar_max <- hclust(SP_distance_mat, 
+                              method = "complete")
+SP_stuff_hierar_ANOVA <- hclust(SP_distance_mat, 
+                                method = "ward.D2")
+
+RP_stuff_hierar_max <- hclust(RP_distance_mat, 
+                              method = "complete")
+RP_stuff_hierar_ANOVA <- hclust(RP_distance_mat, 
+                                method = "ward.D2")
+
+# Plotting dendrogram
+plot(SP_stuff_hierar_max)
+plot(RP_stuff_hierar_ANOVA)
+
+# Choosing number of clusters by cutting tree by height
+abline(h = 110, col = "green")
+
+# Cutting tree by number of clusters
+SP_max_fit <- cutree(SP_stuff_hierar_max, k = 6)
+table(SP_max_fit)
+
+SP_ANOVA_fit <- cutree(SP_stuff_hierar_ANOVA, k = 6)
+table(SP_ANOVA_fit)
+
+RP_max_fit <- cutree(RP_stuff_hierar_max, k = 6)
+table(RP_max_fit)
+
+RP_ANOVA_fit <- cutree(RP_stuff_hierar_ANOVA, k = 6)
+table(RP_ANOVA_fit)
+
+SP_clusters_df <- starter_data %>%
+  mutate(clusters_max = SP_max_fit,
+         clusters_ANOVA = SP_ANOVA_fit)
+
+RP_clusters_df <- reliever_data %>%
+  mutate(clusters_max = RP_max_fit,
+         clusters_ANOVA = RP_ANOVA_fit)
+```
+
+
+## Agglomerative Clustering with agnes
+
+```{r}
+# Bottom-up other method (agglomerative)
+# Ward method minimizes the total within-cluster variance
+SP_hc2 <- agnes(SP_stuff_percentiles, method = "ward")
+RP_hc2 <- agnes(RP_stuff_percentiles, method = "ward")
+# Agglomerative coefficient (closer to 1 the better)
+# Describes the strength of the clustering structure that has 
+# been obtained by Ward's linkage. Increases as n increases.
+SP_hc2$ac
+RP_hc2$ac
+
+SP_hc2_clusters <- cutree(as.hclust(SP_hc2), k = 6)
+table(SP_hc2_clusters)
+
+RP_hc2_clusters <- cutree(as.hclust(RP_hc2), k = 6)
+table(RP_hc2_clusters)
+
+# Looking at accuracy of all method types in agnes
+m <- c( "average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+
+SP_ac <- function(x) {
+  agnes(SP_stuff_percentiles, method = x)$ac
+}
+
+map_dbl(m, SP_ac)
+
+RP_ac <- function(x) {
+  agnes(RP_stuff_percentiles, method = x)$ac
+}
+
+map_dbl(m, RP_ac)
+```
+
+
+## Divisive Clustering with diana
+
+```{r}
+# Top-down approach (Divisive)
+SP_hc4 <- diana(SP_stuff_percentiles)
+RP_hc4 <- diana(RP_stuff_percentiles)
+
+# Divise coefficient. Amount of clustering structure found
+SP_hc4$dc
+RP_hc4$dc
+
+SP_hc4_clusters <- cutree(as.hclust(SP_hc4), k = 6)
+table(SP_hc4_clusters)
+
+RP_hc4_clusters <- cutree(as.hclust(RP_hc4), k = 6)
+table(RP_hc4_clusters)
+```
+
+
+## Optimizing K Clusters
+
+```{r}
+# Optimizing K
+set.seed(3422354)
+# WSS method
+fviz_nbclust(SP_stuff_percentiles, FUN = hcut, method = "wss")
+fviz_nbclust(RP_stuff_percentiles, FUN = hcut, method = "wss")
+
+# Silhouette method
+fviz_nbclust(SP_stuff_percentiles, FUN = hcut, 
+             method = "silhouette")
+fviz_nbclust(RP_stuff_percentiles, FUN = hcut, 
+             method = "silhouette")
+
+# Gap stat method
+SP_gap_stat <- clusGap(SP_stuff_percentiles, FUN = hcut, 
+                       K.max = 10, B = 50, 
+                       method = "Tibs2001SEmax")
+fviz_gap_stat(SP_gap_stat)
+
+RP_gap_stat <- clusGap(RP_stuff_percentiles, FUN = hcut, 
+                       K.max = 10, B = 50,
+                       method = "Tibs2001SEmax")
+fviz_gap_stat(RP_gap_stat)
+
+SP_get_optimal_clus <- function(x) {
+  gap <- clusGap(SP_stuff_percentiles, FUN = hcut, K.max = 10, 
+                 B = x)
+  data.frame(
+    gap_stat = gap[["Tab"]][4, "gap"][[1]],
+    n_clusters =
+fviz_gap_stat(gap)[["layers"]][[4]][["data"]][["xintercept"]]
+  )} 
+
+RP_get_optimal_clus <- function(x) {
+  gap <- clusGap(RP_stuff_percentiles, FUN = hcut, K.max = 10, 
+                 B = x)
+  data.frame(
+    gap_stat = gap[["Tab"]][4, "gap"][[1]],
+    n_clusters =
+fviz_gap_stat(gap)[["layers"]][[4]][["data"]][["xintercept"]]
+)} 
+
+SP_boot_tunegrid <- map(seq(10, 100, 10), SP_get_optimal_clus,
+                        .progress = T) %>%
+  bind_rows() 
+
+RP_boot_tunegrid <- map(seq(10, 100, 10), RP_get_optimal_clus,
+                        .progress = T) %>%
+  bind_rows() 
+```
+
+
+## Final Clustering
+
+```{r}
+# Computing hierarchical clustering with optimal k
+# Choose agnes for best clustering method
+set.seed(5432)
+SP_final <- agnes(SP_stuff_percentiles, method = "ward")
+RP_final <- agnes(RP_stuff_percentiles, method = "ward")
+
+SP_final_clusters <- cutree(as.hclust(SP_final), k = 3)
+table(SP_final_clusters)
+
+RP_final_clusters <- cutree(as.hclust(RP_final), k = 3)
+table(RP_final_clusters)
+
+# Visualizing clusters
+fviz_cluster(list(data = SP_stuff_percentiles, 
+                  cluster = SP_final_clusters), labelsize = 4)
+
+fviz_cluster(list(data = RP_stuff_percentiles, 
+                  cluster = RP_final_clusters), labelsize = 4)
+
+SP_clusters_df <- SP_stuff_percentiles %>%
+  mutate(cluster = SP_final_clusters,
+         Name = starter_data$NameASCII)
+
+RP_clusters_df <- RP_stuff_percentiles %>%
+  mutate(cluster = RP_final_clusters,
+         Name = reliever_data$NameASCII)
+
+SP_cluster_means <- aggregate(. ~ cluster, 
+                              data = SP_clusters_df[, -7],
+                              mean)
+
+RP_cluster_means <- aggregate(. ~ cluster, 
+                              data = RP_clusters_df[, -7],
+                              mean)
+
+clusters_all <- rbind(SP_clusters_df, RP_clusters_df)
+
+clusters_all <- clusters_all %>%
+  mutate(type = case_when(
+    cluster == 1 ~ "Junk",
+    cluster == 2 ~ "Finesse",
+    cluster == 3 ~ "Power"
+  ))
+
+ggplot(clusters_all, aes(x = cluster, 
+                         y = shadow_pct_percentile,
+                         group = cluster)) +
+  geom_boxplot()
+
+ggplot(RP_clusters_df, aes(x = cluster, 
+                           y = K_pct_percentile,
+                           group = cluster)) +
+  geom_boxplot()
+
+SP_clusters_df$cluster <- factor(SP_clusters_df$cluster)
+RP_clusters_df$cluster <- factor(RP_clusters_df$cluster)
+
+SP_diss_matrix <- dist(SP_clusters_df[, c("K_pct_percentile",
+                                          "FAv_percentile",
+                                      "Contact_pct_percentile",
+                                          "BB_pct_percentile",
+                                    "chase_rate_percentile")])
+heatmap(as.matrix(SP_diss_matrix))
+
+RP_diss_matrix <- dist(RP_clusters_df[, c("K_pct_percentile",
+                                          "FAv_percentile",
+                                      "Contact_pct_percentile",
+                                          "BB_pct_percentile",
+                                    "chase_rate_percentile")])
+heatmap(as.matrix(RP_diss_matrix))
+
+library(randomForest)
+library(vip)
+
+SP_rf_model <- randomForest(cluster ~ .,
+                            data = SP_clusters_df[, -7])
+vip(SP_rf_model)
+importance(SP_rf_model, type = 2)
+
+RP_rf_model <- randomForest(cluster ~ ., 
+                            data = RP_clusters_df[, -7])
+vip(RP_rf_model)
+importance(RP_rf_model, type = 2)
+
+fviz_dend(
+  SP_final, k = 6, horiz = TRUE, rect = TRUE, rect_fill = TRUE
+  )
+
+fviz_dend(
+  RP_final, k = 6, horiz = TRUE, rect = TRUE, rect_fill = TRUE
+  )
+
+SP_dend_plot <- fviz_dend(SP_final)                
+SP_dend_data <- attr(SP_dend_plot, "dendrogram") 
+SP_dend_cuts <- cut(SP_dend_data, h = 200)       
+
+# Create sub dendrogram plots
+SP_p1 <- fviz_dend(SP_dend_cuts$lower[[1]])
+SP_p2 <- fviz_dend(SP_dend_cuts$lower[[1]], type = 'circular')
+
+RP_dend_plot <- fviz_dend(RP_final)                
+RP_dend_data <- attr(RP_dend_plot, "dendrogram") 
+RP_dend_cuts <- cut(RP_dend_data, h = 70.5)       
+
+# Create sub dendrogram plots
+RP_p1 <- fviz_dend(RP_dend_cuts$lower[[1]])
+RP_p2 <- fviz_dend(RP_dend_cuts$lower[[1]], type = 'circular')
+```
+
+## Starters and Relievers
+
+```{r}
+clusters_bb <- read_csv("clusters_bb.csv")
+clusters_pd <- read_csv("clusters_pd.csv")
+clusters_roles <- read_csv("clusters_roles.csv")
+
+# Splitting bb data into pitchers and relievers
+SP_clusters_bb <- clusters_bb %>%
+  filter(Role == "SP")
+
+RP_clusters_bb <- clusters_bb %>%
+  filter(Role == "RP")
+
+# Giving starters and relievers names for their bb clusters
+SP_clusters_bb <- SP_clusters_bb %>%
+  mutate(pitcher_class = case_when(
+    cluster == 1 ~ "Extreme Ground Ball",
+    cluster == 2 ~ "Ground Ball",
+    cluster == 3 ~ "Extreme Fly Ball",
+    cluster == 4 ~ "Fly Ball"
+  ))
+
+RP_clusters_bb <- RP_clusters_bb %>%
+  mutate(pitcher_class = case_when(
+    cluster == 1 ~ "Extreme Ground Ball",
+    cluster == 2 ~ "Ground Ball",
+    cluster == 3 ~ "Extreme Fly Ball",
+    cluster == 4 ~ "Fly Ball"
+  ))
+
+# Splitting pd data into starters and relievers
+SP_clusters_pd <- clusters_pd %>%
+  filter(Role == "SP")
+
+RP_clusters_pd <- clusters_pd %>%
+  filter(Role == "RP")
+
+# Giving starters and relievers names for their pd clusters
+SP_clusters_pd <- SP_clusters_pd %>%
+  mutate(pitcher_class = case_when(
+    cluster == 1 ~ "Junk",
+    cluster == 2 ~ "Finesse",
+    cluster == 3 ~ "Power"
+  ))
+
+RP_clusters_pd <- RP_clusters_pd %>%
+  mutate(pitcher_class = case_when(
+    cluster == 1 ~ "Junk",
+    cluster == 2 ~ "Finesse",
+    cluster == 3 ~ "Power"
+  ))
+
+# Merging bb and pd data sets for starters and relievers
+SP_clusters <- merge(SP_clusters_bb, SP_clusters_pd,
+                     by = c("MLBAMID", "Season"))
+
+RP_clusters <- merge(RP_clusters_bb, RP_clusters_pd,
+                     by = c("MLBAMID", "Season"))
+
+# Creating column for merged clusters (12 total) for starters
+SP_clusters <- SP_clusters %>%
+  mutate(pitcher_class = case_when(
+    pitcher_class.x == "Extreme Fly Ball" &
+      pitcher_class.y == "Junk" ~ "Extreme Fly Ball Junk",
+    pitcher_class.x == "Fly Ball" &
+      pitcher_class.y == "Junk" ~ "Fly Ball Junk",
+    pitcher_class.x == "Extreme Ground Ball" &
+      pitcher_class.y == "Junk" ~ "Extreme Ground Ball Junk",
+    pitcher_class.x == "Ground Ball" &
+      pitcher_class.y == "Junk" ~ "Ground Ball Junk",
+    pitcher_class.x == "Extreme Fly Ball" &
+    pitcher_class.y == "Finesse" ~ "Extreme Fly Ball Finesse",
+    pitcher_class.x == "Fly Ball" &
+      pitcher_class.y == "Finesse" ~ "Fly Ball Finesse",
+    pitcher_class.x == "Extreme Ground Ball" &
+  pitcher_class.y == "Finesse" ~ "Extreme Ground Ball Finesse",
+    pitcher_class.x == "Ground Ball" &
+      pitcher_class.y == "Finesse" ~ "Ground Ball Finesse",
+    pitcher_class.x == "Extreme Fly Ball" &
+      pitcher_class.y == "Power" ~ "Extreme Fly Ball Power",
+    pitcher_class.x == "Fly Ball" &
+      pitcher_class.y == "Power" ~ "Fly Ball Power",
+    pitcher_class.x == "Extreme Ground Ball" &
+      pitcher_class.y == "Power" ~ "Extreme Ground Ball Power",
+    pitcher_class.x == "Ground Ball" &
+      pitcher_class.y == "Power" ~ "Ground Ball Power",
+  ))
+
+# Creating column for merged clusters (12 total) for relievers
+RP_clusters <- RP_clusters %>%
+  mutate(pitcher_class = case_when(
+    pitcher_class.x == "Extreme Fly Ball" &
+      pitcher_class.y == "Junk" ~ "Extreme Fly Ball Junk",
+    pitcher_class.x == "Fly Ball" &
+      pitcher_class.y == "Junk" ~ "Fly Ball Junk",
+    pitcher_class.x == "Extreme Ground Ball" &
+      pitcher_class.y == "Junk" ~ "Extreme Ground Ball Junk",
+    pitcher_class.x == "Ground Ball" &
+      pitcher_class.y == "Junk" ~ "Ground Ball Junk",
+    pitcher_class.x == "Extreme Fly Ball" &
+    pitcher_class.y == "Finesse" ~ "Extreme Fly Ball Finesse",
+    pitcher_class.x == "Fly Ball" &
+      pitcher_class.y == "Finesse" ~ "Fly Ball Finesse",
+    pitcher_class.x == "Extreme Ground Ball" &
+  pitcher_class.y == "Finesse" ~ "Extreme Ground Ball Finesse",
+    pitcher_class.x == "Ground Ball" &
+      pitcher_class.y == "Finesse" ~ "Ground Ball Finesse",
+    pitcher_class.x == "Extreme Fly Ball" &
+      pitcher_class.y == "Power" ~ "Extreme Fly Ball Power",
+    pitcher_class.x == "Fly Ball" &
+      pitcher_class.y == "Power" ~ "Fly Ball Power",
+    pitcher_class.x == "Extreme Ground Ball" &
+      pitcher_class.y == "Power" ~ "Extreme Ground Ball Power",
+    pitcher_class.x == "Ground Ball" &
+      pitcher_class.y == "Power" ~ "Ground Ball Power",
+  ))
+
+SP_clusters <- SP_clusters %>%
+  select(MLBAMID, Season, contains("percentile"), 
+         pitcher_class)
+
+RP_clusters <- RP_clusters %>%
+  select(MLBAMID, Season, contains("percentile"), 
+         pitcher_class)
+
+# Cluster frequency for starters
+SP_prop_table <- 
+  table(SP_clusters$pitcher_class) / nrow(SP_clusters)
+
+SP_prop_df <- as.data.frame(SP_prop_table)
+
+SP_prop_df <- pivot_wider(SP_prop_df, names_from = Var1,
+                          values_from = Freq)
+
+# Cluster frequency for relievers
+RP_prop_table <- 
+  table(RP_clusters$pitcher_class) / nrow(RP_clusters)
+
+RP_prop_df <- as.data.frame(RP_prop_table)
+
+RP_prop_df <- pivot_wider(RP_prop_df, names_from = Var1,
+                          values_from = Freq)
+
+# Batted Ball factor proportions for starters
+SP_bb_prop <- SP_clusters %>%
+  mutate(bb = case_when(
+    str_detect(pitcher_class, "Extreme Fly Ball") 
+    ~ "Extreme Fly Ball",
+    str_detect(pitcher_class, "Fly Ball") ~ "Fly Ball",
+    str_detect(pitcher_class, "Extreme Ground Ball") 
+    ~ "Extreme Ground Ball",
+    str_detect(pitcher_class, "Ground Ball") ~ "Ground Ball"
+  )) 
+
+SP_bb_prop_table <- table(SP_bb_prop$bb) / nrow(SP_bb_prop)
+
+SP_bb_prop_df <- as.data.frame(SP_bb_prop_table)
+
+SP_bb_prop_df <- pivot_wider(SP_bb_prop_df, names_from = Var1,
+                             values_from = Freq)
+
+# Batted Ball factor proportions for relievers
+RP_bb_prop <- RP_clusters %>%
+  mutate(bb = case_when(
+    str_detect(pitcher_class, "Extreme Fly Ball") 
+    ~ "Extreme Fly Ball",
+    str_detect(pitcher_class, "Fly Ball") ~ "Fly Ball",
+    str_detect(pitcher_class, "Extreme Ground Ball") 
+    ~ "Extreme Ground Ball",
+    str_detect(pitcher_class, "Ground Ball") ~ "Ground Ball"
+  )) 
+
+RP_bb_prop_table <- table(RP_bb_prop$bb) /
+  nrow(RP_bb_prop)
+
+RP_bb_prop_df <- as.data.frame(RP_bb_prop_table)
+
+RP_bb_prop_df <- pivot_wider(RP_bb_prop_df, names_from = Var1,
+                             values_from = Freq)
+
+# Plate Discipline factor proportions for starters
+SP_pd_prop <- SP_clusters %>%
+  mutate(pd = case_when(
+    str_detect(pitcher_class, "Junk") ~ "Junk",
+    str_detect(pitcher_class, "Finesse") ~ "Finesse",
+    str_detect(pitcher_class, "Power") ~ "Power",
+  )) 
+
+SP_pd_prop_table <- table(SP_pd_prop$pd) / nrow(SP_pd_prop)
+
+SP_pd_prop_df <- as.data.frame(SP_pd_prop_table)
+
+SP_pd_prop_df <- pivot_wider(SP_pd_prop_df, names_from = Var1,
+                             values_from = Freq)
+
+# Plate Discipline factor proportions for relievers
+RP_pd_prop <- RP_clusters %>%
+  mutate(pd = case_when(
+    str_detect(pitcher_class, "Junk") ~ "Junk",
+    str_detect(pitcher_class, "Finesse") ~ "Finesse",
+    str_detect(pitcher_class, "Power") ~ "Power",
+  )) 
+
+RP_pd_prop_table <- table(RP_pd_prop$pd) / nrow(RP_pd_prop)
+
+RP_pd_prop_df <- as.data.frame(RP_pd_prop_table)
+
+RP_pd_prop_df <- pivot_wider(RP_pd_prop_df, names_from = Var1,
+                             values_from = Freq)
+
+```
+
+```{r}
+basic_theme <- function() {
+  theme(text = element_text(color = "black"), 
+        axis.title = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5), 
+        legend.title = element_text(face = "bold"), 
+        plot.subtitle = element_text(face = "italic", 
+                                     hjust = 0.5))
+}
+
+starter_data <- starter_data %>%
+  select(MLBAMID, Season, NameASCII)
+
+SP_pd_prop <- merge(SP_pd_prop, starter_data, 
+                    by = c("MLBAMID", "Season"))
+
+reliever_data <- reliever_data %>%
+  select(MLBAMID, Season, NameASCII)
+
+RP_pd_prop <- merge(RP_pd_prop, reliever_data, 
+                    by = c("MLBAMID", "Season"))
+
+final_clusters <- rbind(SP_pd_prop, RP_pd_prop)
+
+final_clusters$pd <- 
+  as.factor(final_clusters$pd)
+
+ggplot(final_clusters, aes(x = pd, 
+                           y = Contact_pct_percentile,
+                           group = pd)) +
+  geom_boxplot() +
+  labs(x = "",
+       y = "Percentile in Contact %",
+       title = "Contact % Distribution Between Clusters") +
+  theme_bw() +
+  basic_theme()
+
+SP_bb_prop <- merge(SP_bb_prop, starter_data, 
+                    by = c("MLBAMID", "Season"))
+
+RP_bb_prop <- merge(RP_bb_prop, reliever_data, 
+                    by = c("MLBAMID", "Season"))
+
+final_clusters <- rbind(SP_bb_prop, RP_bb_prop)
+
+final_clusters$bb <- 
+  as.factor(final_clusters$bb)
+
+ggplot(final_clusters, aes(x = bb, 
+                           y = topped_pct_percentile,
+                           group = bb)) +
+  geom_boxplot() +
+  labs(x = "",
+       y = "Percentile in Topped %",
+       title = "Topped % Distribution Between Clusters") +
+  theme_bw() +
+  basic_theme()
+
+ggplot(final_clusters, aes(x = bb, 
+                           y = under_pct_percentile,
+                           group = bb)) +
+  geom_boxplot() +
+  labs(x = "",
+       y = "Percentile in Under %",
+       title = "Under % Distribution Between Clusters") +
+  theme_bw() +
+  basic_theme()
+```
